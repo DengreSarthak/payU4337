@@ -1,0 +1,27 @@
+# env
+.env
+.env.local
+.env.*.local
+
+# node
+node_modules/
+dist/
+*.log
+
+# foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/lib/
+
+# editor
+.vscode/
+.idea/
+.DS_Store
+
+# secrets (just in case)
+*.pem
+*.key
+
+# INTERNAL — do not commit this when handing the repo to candidates.
+EVALUATION.md

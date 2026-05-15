@@ -1,0 +1,15 @@
+{
+  "name": "membership-platform-take-home",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "backend"
+  ],
+  "scripts": {
+    "contracts:build": "cd contracts && forge build",
+    "contracts:test": "cd contracts && forge test -vv",
+    "backend:dev": "cd backend && npm run dev",
+    "backend:migrate": "cd backend && npm run migrate",
+    "backend:test": "cd backend && npm test"
+  }
+}
