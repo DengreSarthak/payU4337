@@ -44,7 +44,6 @@ contract MembershipSBT is
     function initialize(address admin, string memory baseURI) external initializer {
         __ERC721_init("Member SBT", "MSBT");
         __AccessControl_init();
-        __UUPSUpgradeable_init();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(MINTER_ROLE, admin);
@@ -79,6 +78,10 @@ contract MembershipSBT is
     // ---- soulbound enforcement --------------------------------------------
 
     function transferFrom(address, address, uint256) public pure override {
+        revert SoulboundTransferDisabled();
+    }
+
+    function safeTransferFrom(address, address, uint256, bytes memory) public pure override {
         revert SoulboundTransferDisabled();
     }
 

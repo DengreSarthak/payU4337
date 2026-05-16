@@ -8,15 +8,16 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {MembershipSBT} from "./MembershipSBT.sol";
 
+interface IMembershipSBTV2 {
+    function markClaimed(uint256 tokenId, uint256 epoch) external;
+}
+
 /// @title RewardsDistributor
 /// @notice Distributes ERC-20 rewards across a layered waterfall:
 ///         Layer 1 — treasury split (rewards / ops / burn) on deposit
 ///         Layer 2 — per-tier allocation of the rewards pool, per epoch
 ///         Layer 3 — intra-tier pro-rata by reputation
 ///         Layer 4 — protocol fee skimmed on every claim, routed to ops
-///
-/// @dev This contract is the previous engineer's draft. Math is wrong in places.
-///      Finish the implementation, fix what is broken, and write an invariant test.
 contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgradeable {
     using SafeERC20 for IERC20;
 
@@ -33,7 +34,7 @@ contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgr
     uint256 public burnBps;    // -> burn sink
 
     // ---- Layer 2: per-tier allocation -------------------------------------
-    /// @dev tierBps[Tier.Bronze] + tierBps[Silver] + tierBps[Gold] + tierBps[Platinum] should be BPS
+    /// @dev tierBps[Tier.Bronze] + tierBps[Silver] + tierBps[Gold] + tierBps[Platinum] must be <= BPS.
     mapping(MembershipSBT.Tier => uint256) public tierBps;
 
     // ---- Layer 4: protocol fee on every claim -----------------------------
@@ -49,30 +50,44 @@ contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgr
     uint256 public currentEpoch;
     uint256 public epochDuration;     // seconds
     uint256 public currentEpochStart; // unix
-    uint256 public rewardsPoolAccrued; // running total deposited into rewards pool
+    uint256 public rewardsPoolAccrued; // running total deposited into rewards pool this epoch
 
     struct EpochSnapshot {
         uint256 totalForEpoch;                              // tokens allocated to rewards pool this epoch
         mapping(MembershipSBT.Tier => uint256) tierTotalRep; // reputation total per tier at close
+        mapping(MembershipSBT.Tier => uint256) tierBpsSnapshot; // tier allocations frozen at close
     }
     mapping(uint256 => EpochSnapshot) internal epochs;
 
-    /// @dev reputation maintained off-chain, pushed in by backend via REPUTATION oracle.
+    /// @dev reputation maintained off-chain, pushed in by backend via CONFIG_ROLE.
     mapping(uint256 => uint256) public reputationOf; // tokenId -> reputation
 
     /// @dev claimed[tokenId][epoch] = true once claimed.
     mapping(uint256 => mapping(uint256 => bool)) public claimed;
 
+    // ---- v2 SBT integration -----------------------------------------------
+    /// @dev When true, claim() calls markClaimed() on the SBT to track lastClaimedEpoch.
+    bool public sbtIsV2;
+
+    // ---- events -----------------------------------------------------------
     event Deposited(address indexed from, uint256 amount, uint256 toRewards, uint256 toOps, uint256 toBurn);
     event EpochClosed(uint256 indexed epoch, uint256 totalForEpoch);
     event RewardClaimed(uint256 indexed tokenId, uint256 indexed epoch, uint256 amount);
     event ReputationUpdated(uint256 indexed tokenId, uint256 newReputation);
 
+    // ---- errors -----------------------------------------------------------
     error AlreadyClaimed();
     error EpochNotClosed();
+    error EpochNotElapsed();
     error NotHolder();
     error NothingToClaim();
     error InvalidConfig();
+    error UnsortedOrDuplicateTokenIds();
+
+    // ---- internal ---------------------------------------------------------
+    function _validateTreasurySplit(uint256 _rewards, uint256 _ops, uint256 _burn) internal pure {
+        if (_rewards + _ops + _burn != BPS) revert InvalidConfig();
+    }
 
     function initialize(
         address admin,
@@ -83,7 +98,6 @@ contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgr
         uint256 _epochDuration
     ) external initializer {
         __AccessControl_init();
-        __UUPSUpgradeable_init();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(CONFIG_ROLE, admin);
@@ -101,7 +115,7 @@ contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgr
         // Defaults — operator may retune via setTreasurySplit / setTierBps.
         rewardsBps = 7000;
         opsBps = 2000;
-        burnBps = 999;
+        burnBps = 1000;
 
         tierBps[MembershipSBT.Tier.Bronze] = 1000;
         tierBps[MembershipSBT.Tier.Silver] = 2000;
@@ -111,12 +125,11 @@ contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgr
         claimFeeBps = 200;
     }
 
-    // ---- config -----------------------------------------------------------
-
     function setTreasurySplit(uint256 _rewards, uint256 _ops, uint256 _burn)
         external
         onlyRole(CONFIG_ROLE)
     {
+        _validateTreasurySplit(_rewards, _ops, _burn);
         rewardsBps = _rewards;
         opsBps = _ops;
         burnBps = _burn;
@@ -135,8 +148,30 @@ contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgr
         emit ReputationUpdated(tokenId, rep);
     }
 
-    // ---- Layer 1: deposit -------------------------------------------------
+    function setSbtIsV2(bool v) external onlyRole(CONFIG_ROLE) {
+        sbtIsV2 = v;
+    }
 
+    /// @notice Returns the sum of all four tier allocations and whether it is within BPS.
+    function getTierBpsTotal() external view returns (uint256 total, bool valid) {
+        total = tierBps[MembershipSBT.Tier.Bronze] + tierBps[MembershipSBT.Tier.Silver] + tierBps[MembershipSBT.Tier.Gold] + tierBps[MembershipSBT.Tier.Platinum];
+        valid = total <= BPS;
+    }
+
+    function getEpochTotal(uint256 epochId) external view returns (uint256) {
+        return epochs[epochId].totalForEpoch;
+    }
+
+    function getEpochTierTotal(uint256 epochId, MembershipSBT.Tier t) external view returns (uint256) {
+        return epochs[epochId].tierTotalRep[t];
+    }
+
+    function getEpochTierBps(uint256 epochId, MembershipSBT.Tier t) external view returns (uint256) {
+        return epochs[epochId].tierBpsSnapshot[t];
+    }
+
+    // ---- Layer 1: deposit -------------------------------------------------
+    
     function deposit(uint256 amount) external onlyRole(DEPOSITOR_ROLE) {
         rewardToken.safeTransferFrom(msg.sender, address(this), amount);
 
@@ -153,15 +188,26 @@ contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgr
 
     // ---- Layer 2: close epoch ---------------------------------------------
 
-    /// @notice Closes the current epoch, snapshots tier reputation totals, advances clock.
-    /// @dev anyone may call; intended to be called by a backend cron.
-    function closeEpoch(uint256[] calldata tokenIds) external {
+    /// @notice Closes the current epoch, snapshots tier reputation totals and tier bps, advances clock.
+    /// @dev tokenIds must be sorted strictly ascending — enforced to prevent duplicate reputation counting.
+    function closeEpoch(uint256[] calldata tokenIds) external onlyRole(EPOCH_CLOSER_ROLE) {
+        if (block.timestamp < currentEpochStart + epochDuration) revert EpochNotElapsed();
+
         EpochSnapshot storage e = epochs[currentEpoch];
         e.totalForEpoch = rewardsPoolAccrued;
         rewardsPoolAccrued = 0;
 
+        // Freeze tier allocations so future setTierBps calls cannot alter past-epoch claims.
+        e.tierBpsSnapshot[MembershipSBT.Tier.Bronze]   = tierBps[MembershipSBT.Tier.Bronze];
+        e.tierBpsSnapshot[MembershipSBT.Tier.Silver]   = tierBps[MembershipSBT.Tier.Silver];
+        e.tierBpsSnapshot[MembershipSBT.Tier.Gold]     = tierBps[MembershipSBT.Tier.Gold];
+        e.tierBpsSnapshot[MembershipSBT.Tier.Platinum] = tierBps[MembershipSBT.Tier.Platinum];
+
+        uint256 prev;
         for (uint256 i = 0; i < tokenIds.length; i++) {
             uint256 id = tokenIds[i];
+            if (i != 0 && id <= prev) revert UnsortedOrDuplicateTokenIds();
+            prev = id;
             MembershipSBT.Tier t = sbt.tierOf(id);
             e.tierTotalRep[t] += reputationOf[id];
         }
@@ -184,18 +230,24 @@ contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgr
         uint256 tierTotal = e.tierTotalRep[t];
         if (tierTotal == 0) revert NothingToClaim();
 
-        uint256 tierAlloc = (e.totalForEpoch * tierBps[t]) / BPS;
-        uint256 userShare = (tierAlloc * reputationOf[tokenId] + tierTotal - 1) / tierTotal;
+        // Use the tier bps frozen at epoch close, not the current live value.
+        uint256 tierAlloc = (e.totalForEpoch * e.tierBpsSnapshot[t]) / BPS;
+        uint256 userShare = (tierAlloc * reputationOf[tokenId]) / tierTotal;
         if (userShare == 0) revert NothingToClaim();
 
         uint256 fee = (userShare * claimFeeBps) / BPS;
         uint256 payout = userShare - fee;
 
         claimed[tokenId][epoch] = true;
+
+        if (sbtIsV2) {
+            IMembershipSBTV2(address(sbt)).markClaimed(tokenId, epoch);
+        }
+
         rewardToken.safeTransfer(opsWallet, fee);
         rewardToken.safeTransfer(msg.sender, payout);
 
-        emit RewardClaimed(tokenId, epoch, userShare);
+        emit RewardClaimed(tokenId, epoch, payout);
     }
 
     // ---- upgrades ---------------------------------------------------------
