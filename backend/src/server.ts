@@ -1,17 +1,15 @@
 import express from "express";
 import { JsonRpcProvider, Wallet, Contract } from "ethers";
+import { z } from "zod";
 import { handleClaim } from "./claim";
-import { Indexer } from "./indexer";
+import { Indexer, SBT_ABI, REWARDS_ABI } from "./indexer";
 
-const SBT_ABI = [
-  "event Minted(address indexed to, uint256 indexed tokenId, uint8 tier)",
-  "event TierChanged(uint256 indexed tokenId, uint8 oldTier, uint8 newTier)",
-];
-
-const REWARDS_ABI = [
-  "event RewardClaimed(uint256 indexed tokenId, uint256 indexed epoch, uint256 amount)",
-  "event EpochClosed(uint256 indexed epoch, uint256 totalForEpoch)",
-];
+const ClaimReqSchema = z.object({
+  smartAccount: z.string().regex(/^0x[0-9a-fA-F]{40}$/, "smartAccount must be a checksummed hex address"),
+  tokenId: z.string().min(1, "tokenId is required"),
+  epoch: z.string().min(1, "epoch is required"),
+  userSignature: z.string().startsWith("0x", "userSignature must be a 0x-prefixed hex string"),
+});
 
 async function main() {
   const provider = new JsonRpcProvider(process.env.RPC_URL);
@@ -30,8 +28,14 @@ async function main() {
   app.use(express.json());
 
   app.post("/claim", async (req, res) => {
+    const parsed = ClaimReqSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ ok: false, reason: parsed.error.issues[0].message });
+      return;
+    }
+
     try {
-      const result = await handleClaim(req.body, {
+      const result = await handleClaim(parsed.data, {
         provider,
         entryPoint: process.env.ENTRYPOINT_ADDRESS!,
         paymaster: process.env.PAYMASTER_ADDRESS!,

@@ -1,4 +1,4 @@
-import { AbiCoder, getBytes, JsonRpcProvider, Wallet, ZeroAddress, concat, toBeHex } from "ethers";
+import { AbiCoder, getBytes, JsonRpcProvider, Wallet, ZeroAddress, concat, toBeHex, keccak256 } from "ethers";
 
 const abi = AbiCoder.defaultAbiCoder();
 
@@ -32,13 +32,10 @@ export async function signPaymasterApproval(
   nonce: bigint,
 ): Promise<string> {
   const msg = abi.encode(["address", "uint256"], [sender, nonce]);
-  const digest = getBytes(keccak(msg));
+  const digest = getBytes(keccak256(msg));
   return signer.signMessage(digest);
 }
 
-function keccak(s: string): string {
-  return require("ethers").keccak256(s);
-}
 
 /**
  * Build the paymasterAndData bytes the EntryPoint will hand to the paymaster.

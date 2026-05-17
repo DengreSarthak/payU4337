@@ -1,5 +1,3 @@
-import fetch from "node-fetch";
-
 const TENDERLY_BASE = "https://api.tenderly.co/api/v1";
 
 type SimulationArgs = {

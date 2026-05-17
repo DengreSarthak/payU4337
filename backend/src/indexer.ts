@@ -9,16 +9,23 @@ const SBT_ABI = [
 const REWARDS_ABI = [
   "event RewardClaimed(uint256 indexed tokenId, uint256 indexed epoch, uint256 amount)",
   "event EpochClosed(uint256 indexed epoch, uint256 totalForEpoch)",
+  "function reputationOf(uint256) view returns (uint256)",
 ];
 
 const POLL_INTERVAL_MS = 4_000;
 const BATCH = 500;
+// Stay this many blocks behind the tip so a reorg does not leave phantom events in the DB.
+const REORG_BUFFER = 12;
 
 /**
  * Indexer
  *
  * Streams events from the SBT and RewardsDistributor contracts into Postgres.
  * Maintains a cursor table so it resumes from where it left off after a crash.
+ *
+ * Reorg safety: we never index closer than REORG_BUFFER blocks to the chain tip.
+ * Events within the buffer window are picked up on the next tick once they are
+ * deep enough to be considered final.
  */
 export class Indexer {
   constructor(
@@ -40,9 +47,10 @@ export class Indexer {
 
   async tick() {
     const head = await this.provider.getBlockNumber();
+    const safeHead = head - REORG_BUFFER;
     const cursor = await this.getCursor();
     const from = cursor + 1;
-    const to = Math.min(head, from + BATCH - 1);
+    const to = Math.min(safeHead, from + BATCH - 1);
     if (to < from) return;
 
     const [mints, tiers, claims, epochs] = await Promise.all([
@@ -76,17 +84,40 @@ export class Indexer {
       `UPDATE members SET tier = $1 WHERE token_id = $2`,
       [Number(newTier), tokenId.toString()],
     );
+    // Record the tier change in tier_history for historical queries.
+    // ON CONFLICT uses the unique index added in migration 004.
+    await pool.query(
+      `INSERT INTO tier_history (token_id, tier, block_number, tx_hash)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (token_id, tx_hash) DO NOTHING`,
+      [tokenId.toString(), Number(newTier), log.blockNumber, log.transactionHash],
+    );
   }
 
   private async onClaim(log: Log) {
     const { tokenId, epoch, amount } = (log as any).args ?? {};
-    // Mark this claim processed in our books — this is the source of truth
-    // the reputation engine reads to credit "claimed-this-epoch" reputation.
+
+    // Fetch the reputation that was used to compute this payout at the exact claim block.
+    let reputationSnapshot = "0";
+    try {
+      const rep = await this.rewards.reputationOf(tokenId.toString(), { blockTag: log.blockNumber });
+      reputationSnapshot = rep.toString();
+    } catch {
+      // If the historical call fails (e.g. node doesn't support archive), default to 0.
+    }
+
     await pool.query(
-      `INSERT INTO claims (token_id, epoch, amount, tx_hash, block_number, processed)
-       VALUES ($1, $2, $3, $4, $5, true)
+      `INSERT INTO claims (token_id, epoch, amount, reputation_snapshot, tx_hash, block_number, processed)
+       VALUES ($1, $2, $3, $4, $5, $6, true)
        ON CONFLICT (tx_hash) DO NOTHING`,
-      [tokenId.toString(), epoch.toString(), amount.toString(), log.transactionHash, log.blockNumber],
+      [
+        tokenId.toString(),
+        epoch.toString(),
+        amount.toString(),
+        reputationSnapshot,
+        log.transactionHash,
+        log.blockNumber,
+      ],
     );
 
     // Credit reputation immediately so the user sees their points update in the UI.
@@ -123,3 +154,5 @@ export class Indexer {
     );
   }
 }
+
+export { REWARDS_ABI, SBT_ABI };
