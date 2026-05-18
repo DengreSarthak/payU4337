@@ -37,8 +37,10 @@ contract SmartAccount {
         uint256 missingAccountFunds
     ) external onlyEntryPoint returns (uint256 validationData) {
         bytes32 digest = userOpHash.toEthSignedMessageHash();
-        address recovered = digest.recover(userOp.signature);
-        if (recovered != owner) revert BadSignature();
+        (address recovered, ECDSA.RecoverError error, ) = digest.tryRecover(userOp.signature);
+        if (error != ECDSA.RecoverError.NoError || recovered != owner) {
+            return 1;
+        }
 
         if (missingAccountFunds > 0) {
             (bool ok,) = payable(msg.sender).call{value: missingAccountFunds}("");
