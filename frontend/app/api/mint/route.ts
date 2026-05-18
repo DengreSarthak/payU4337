@@ -8,7 +8,7 @@ import {
   SMART_ACCOUNT_IFACE,
   MINTER_ROLE,
 } from "../../../lib/contracts";
-import SMART_ACCOUNT_ARTIFACT from "../../../../contracts/out/SmartAccount.sol/SmartAccount.json";
+import { SMART_ACCOUNT_BYTECODE } from "../../../lib/smartAccountBytecode";
 
 type MintBody = {
   owner: string;      // connected wallet EOA — used to derive SA (must have MINTER_ROLE)
