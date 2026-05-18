@@ -69,6 +69,10 @@ contract RewardsDistributor is Initializable, AccessControlUpgradeable, UUPSUpgr
     /// @dev When true, claim() calls markClaimed() on the SBT to track lastClaimedEpoch.
     bool public sbtIsV2;
 
+    constructor() {
+        _disableInitializers();
+    }
+
     // ---- events -----------------------------------------------------------
     event Deposited(address indexed from, uint256 amount, uint256 toRewards, uint256 toOps, uint256 toBurn);
     event EpochClosed(uint256 indexed epoch, uint256 totalForEpoch);

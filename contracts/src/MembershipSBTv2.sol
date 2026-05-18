@@ -38,6 +38,10 @@ contract MembershipSBTv2 is
     uint256[45] private __gap;
     // -----------------------------------------------------------------------
 
+    constructor() {
+        _disableInitializers();
+    }
+
     event Minted(address indexed to, uint256 indexed tokenId, Tier tier);
     event TierChanged(uint256 indexed tokenId, Tier oldTier, Tier newTier);
     event Revoked(address indexed holder, uint256 indexed tokenId);
@@ -92,6 +96,10 @@ contract MembershipSBTv2 is
     // ---- soulbound enforcement --------------------------------------------
 
     function transferFrom(address, address, uint256) public pure override {
+        revert SoulboundTransferDisabled();
+    }
+
+    function safeTransferFrom(address, address, uint256, bytes memory) public pure override {
         revert SoulboundTransferDisabled();
     }
 

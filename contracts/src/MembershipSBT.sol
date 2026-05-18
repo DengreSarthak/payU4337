@@ -34,6 +34,11 @@ contract MembershipSBT is
     uint256[46] private __gap;
     // -----------------------------------------------------------------------
 
+    /// @dev Prevents the implementation contract from being initialized directly.
+    constructor() {
+        _disableInitializers();
+    }
+
     event Minted(address indexed to, uint256 indexed tokenId, Tier tier);
     event TierChanged(uint256 indexed tokenId, Tier oldTier, Tier newTier);
 
