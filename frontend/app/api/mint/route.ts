@@ -43,7 +43,7 @@ export async function POST(request: Request) {
     // 2. Derive the caller's SmartAccount address (owner + salt).
     const salt = BigInt(body.salt ?? "0");
     const initCode = concat([
-      SMART_ACCOUNT_ARTIFACT.bytecode.object,
+      SMART_ACCOUNT_BYTECODE,
       abi.encode(["address", "address"], [entryPointAddress, owner]),
     ]);
     const sender = getCreate2Address(factoryAddress, toBeHex(salt, 32), keccak256(initCode));
