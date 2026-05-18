@@ -27,12 +27,14 @@ export type ClaimReq = {
   tokenId: string;
   epoch: string;
   userSignature: string;
+  userOpSignature?: string; // UserOp hash signature; when present the backend submits directly to the bundler
 };
 
 export type ClaimResp = {
   ok: true;
   userOp: PackedUserOp;
   tenderlyUrl?: string;
+  bundlerResult?: unknown;
 } | {
   ok: false;
   reason: string;
@@ -137,5 +139,82 @@ export async function handleClaim(
     return { ok: false, reason: `tenderly says revert: ${sim.url ?? "no url"}` };
   }
 
-  return { ok: true, userOp, tenderlyUrl: sim.url };
+  // 9. If the client provided the user's UserOp signature, submit directly to the bundler.
+  let bundlerResult: unknown | undefined;
+  if (req.userOpSignature) {
+    const signedUserOp: PackedUserOp = { ...userOp, signature: req.userOpSignature };
+    const bundlerUrl = process.env.BUNDLER_URL;
+    if (!bundlerUrl) {
+      return { ok: false, reason: "BUNDLER_URL is not configured on backend" };
+    }
+    bundlerResult = await submitToBundler(bundlerUrl, signedUserOp, ctx.entryPoint);
+  }
+
+  return { ok: true, userOp, tenderlyUrl: sim.url, bundlerResult };
+}
+
+function splitPacked128(value: string) {
+  const hex = value.replace(/^0x/, "").padStart(64, "0");
+  return {
+    hi: `0x${hex.slice(0, 32)}`,
+    lo: `0x${hex.slice(32, 64)}`,
+  };
+}
+
+function toBundlerUserOp(userOp: PackedUserOp): Record<string, string> {
+  const { hi: verificationGasLimit, lo: callGasLimit } = splitPacked128(userOp.accountGasLimits);
+  const { hi: maxPriorityFeePerGas, lo: maxFeePerGas } = splitPacked128(userOp.gasFees);
+
+  const initCode = userOp.initCode ?? "0x";
+  const paymasterAndData = userOp.paymasterAndData ?? "0x";
+
+  const hasInitCode = initCode !== "0x";
+  const hasPaymaster = paymasterAndData !== "0x";
+
+  const bundlerUserOp: Record<string, string> = {
+    sender: userOp.sender,
+    nonce: userOp.nonce.toString(),
+    callData: userOp.callData,
+    callGasLimit,
+    verificationGasLimit,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+    preVerificationGas: userOp.preVerificationGas.toString(),
+    signature: userOp.signature,
+  };
+
+  if (hasInitCode) {
+    bundlerUserOp.factory = `0x${initCode.slice(2, 42)}`;
+    bundlerUserOp.factoryData = `0x${initCode.slice(42)}`;
+  }
+
+  if (hasPaymaster) {
+    const paymasterHex = paymasterAndData.slice(2);
+    bundlerUserOp.paymaster = `0x${paymasterHex.slice(0, 40)}`;
+    bundlerUserOp.paymasterVerificationGasLimit = `0x${paymasterHex.slice(40, 72)}`;
+    bundlerUserOp.paymasterPostOpGasLimit = `0x${paymasterHex.slice(72, 104)}`;
+    const paymasterData = `0x${paymasterHex.slice(104)}`;
+    if (paymasterData !== "0x") bundlerUserOp.paymasterData = paymasterData;
+  }
+
+  return bundlerUserOp;
+}
+
+async function submitToBundler(bundlerUrl: string, userOp: PackedUserOp, entryPoint: string): Promise<unknown> {
+  const bundlerUserOp = toBundlerUserOp(userOp);
+  const response = await fetch(bundlerUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_sendUserOperation",
+      params: [bundlerUserOp, entryPoint],
+    }),
+  });
+  const json = (await response.json()) as { result?: unknown; error?: { message?: string } };
+  if (!response.ok || json.error) {
+    throw new Error(json.error?.message ?? `bundler request failed (${response.status})`);
+  }
+  return json.result;
 }

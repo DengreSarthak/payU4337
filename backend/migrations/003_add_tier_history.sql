@@ -14,11 +14,18 @@ CREATE TABLE IF NOT EXISTS tier_history (
 
 CREATE INDEX IF NOT EXISTS tier_history_token_block_idx ON tier_history (token_id, block_number DESC);
 
--- Backfill: every existing member gets an initial Bronze tier_history row at their mint block.
+-- Unique index so the INSERT below can use ON CONFLICT (also used by indexer for idempotency).
+CREATE UNIQUE INDEX IF NOT EXISTS tier_history_token_tx_uniq
+    ON tier_history (token_id, tx_hash);
+
+-- Backfill: every existing member gets an initial tier_history row at their mint block.
+-- ON CONFLICT prevents duplicate rows if this migration is ever re-run after a partial failure.
 INSERT INTO tier_history (token_id, tier, block_number, tx_hash)
-SELECT token_id, 0, minted_block, minted_tx FROM members;
+SELECT token_id, tier, minted_block, minted_tx FROM members
+ON CONFLICT (token_id, tx_hash) DO NOTHING;
 
 -- The RewardsDistributor's reputation push now requires every claim row to carry the
--- snapshotted reputation that was used to compute the payout. Add the column.
+-- snapshotted reputation that was used to compute the payout. Add the column with
+-- DEFAULT 0 so it succeeds on a populated database (existing rows get 0).
 ALTER TABLE claims
-    ADD COLUMN reputation_snapshot NUMERIC NOT NULL;
+    ADD COLUMN reputation_snapshot NUMERIC NOT NULL DEFAULT 0;

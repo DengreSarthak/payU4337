@@ -1,6 +1,9 @@
 import {readdir, readFile} from "node:fs/promises";
 import {join, resolve} from "node:path";
+import { config } from "dotenv";
 import {pool} from "./db";
+
+config({ path: resolve(process.cwd(), "../.env") });
 
 const MIGRATIONS_DIR = resolve(process.cwd(), "migrations");
 
@@ -18,7 +21,7 @@ async function applied(): Promise<Set<string>> {
     return new Set(r.rows.map((x) => x.filename));
 }
 
-async function main() {
+export async function runMigrations() {
     await ensureTable();
     const done = await applied();
 
@@ -35,10 +38,18 @@ async function main() {
     }
 
     console.log("[migrate] done");
-    await pool.end();
 }
 
-main().catch((e) => {
-    console.error(e);
-    process.exit(1);
-});
+async function main() {
+    try {
+        await runMigrations();
+        await pool.end();
+    } catch (e) {
+        console.error(e);
+        process.exit(1);
+    }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+    main();
+}

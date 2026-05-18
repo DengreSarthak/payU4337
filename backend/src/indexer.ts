@@ -1,5 +1,5 @@
 import { JsonRpcProvider, Contract, Log } from "ethers";
-import { pool } from "./db";
+import { pool, withTx } from "./db";
 
 const SBT_ABI = [
   "event Minted(address indexed to, uint256 indexed tokenId, uint8 tier)",
@@ -23,9 +23,19 @@ const REORG_BUFFER = 12;
  * Streams events from the SBT and RewardsDistributor contracts into Postgres.
  * Maintains a cursor table so it resumes from where it left off after a crash.
  *
- * Reorg safety: we never index closer than REORG_BUFFER blocks to the chain tip.
- * Events within the buffer window are picked up on the next tick once they are
- * deep enough to be considered final.
+ * Reorg safety:
+ *  1. We store both block_number and block_hash in the cursor.
+ *  2. Before each tick we verify the block at the cursor still has the same hash.
+ *  3. If the hash changed (reorg), we rewind the cursor by REORG_BUFFER blocks.
+ *  4. The entire tick (all event inserts + cursor update) runs in one DB transaction.
+ *     If the process crashes mid-tick, Postgres rolls back — no partial state.
+ *
+ * Known race that was fixed:
+ *  Previously events were written outside a transaction. A crash between
+ *  `INSERT INTO claims` and the reputation UPDATE left the claim row in the DB
+ *  but without the cursor being advanced. On restart the same block range was
+ *  re-scanned, the claim insert was skipped by ON CONFLICT, but the reputation
+ *  UPDATE ran again, inflating the score by +10 every restart.
  */
 export class Indexer {
   constructor(
@@ -48,8 +58,11 @@ export class Indexer {
   async tick() {
     const head = await this.provider.getBlockNumber();
     const safeHead = head - REORG_BUFFER;
-    const cursor = await this.getCursor();
-    const from = cursor + 1;
+
+    // Detect reorgs and rewind cursor if necessary.
+    const cursor = await this.reconcileCursor(safeHead);
+
+    const from = cursor.block + 1;
     const to = Math.min(safeHead, from + BATCH - 1);
     if (to < from) return;
 
@@ -60,33 +73,79 @@ export class Indexer {
       this.rewards.queryFilter(this.rewards.filters.EpochClosed(), from, to),
     ]);
 
-    for (const log of mints) await this.onMint(log);
-    for (const log of tiers) await this.onTierChange(log);
-    for (const log of claims) await this.onClaim(log);
-    for (const log of epochs) await this.onEpochClosed(log);
+    const toBlock = await this.provider.getBlock(to);
+    const toHash = toBlock?.hash ?? null;
+    if (!toHash) {
+      console.warn(`[indexer] could not fetch block hash for ${to}, skipping tick`);
+      return;
+    }
 
-    await this.setCursor(to);
+    // Process everything in a single DB transaction.
+    await withTx(async (client) => {
+      for (const log of mints) await this.onMint(client, log);
+      for (const log of tiers) await this.onTierChange(client, log);
+      for (const log of claims) await this.onClaim(client, log);
+      for (const log of epochs) await this.onEpochClosed(client, log);
+
+      await client.query(
+        `INSERT INTO indexer_cursor (id, block_number, block_hash)
+         VALUES (1, $1, $2)
+         ON CONFLICT (id)
+         DO UPDATE SET block_number = EXCLUDED.block_number, block_hash = EXCLUDED.block_hash`,
+        [to, toHash],
+      );
+    });
+
+    console.log(`[indexer] indexed blocks ${from}–${to} (${mints.length} mints, ${tiers.length} tiers, ${claims.length} claims, ${epochs.length} epochs)`);
   }
 
-  private async onMint(log: Log) {
+  /**
+   * Reconcile the cursor against on-chain block hashes.
+   * If the block at the stored cursor was reorged out, rewind by REORG_BUFFER.
+   */
+  private async reconcileCursor(safeHead: number): Promise<{ block: number; hash: string | null }> {
+    const r = await pool.query<{ block_number: string; block_hash: string | null }>(
+      `SELECT block_number, block_hash FROM indexer_cursor WHERE id = 1`,
+    );
+    const row = r.rows[0];
+    let block = row ? Number(row.block_number) : 0;
+    let hash = row?.block_hash ?? null;
+
+    if (block > 0 && hash) {
+      try {
+        const onChain = await this.provider.getBlock(block);
+        if (!onChain || onChain.hash !== hash) {
+          console.warn(`[indexer] reorg detected at block ${block}; rewinding ${REORG_BUFFER} blocks`);
+          block = Math.max(0, block - REORG_BUFFER);
+          hash = null;
+        }
+      } catch (e) {
+        console.warn(`[indexer] failed to verify block ${block} hash, rewinding`, e);
+        block = Math.max(0, block - REORG_BUFFER);
+        hash = null;
+      }
+    }
+
+    return { block, hash };
+  }
+
+  private async onMint(client: import("pg").PoolClient, log: Log) {
     const { to, tokenId, tier } = (log as any).args ?? {};
-    await pool.query(
-      `INSERT INTO members (address, token_id, tier, minted_block, minted_tx)
-       VALUES ($1, $2, $3, $4, $5)
+    await client.query(
+      `INSERT INTO members (address, token_id, tier, minted_block, minted_tx, owner)
+       VALUES ($1, $2, $3, $4, $5, $1)
        ON CONFLICT (address) DO NOTHING`,
       [to.toLowerCase(), tokenId.toString(), Number(tier), log.blockNumber, log.transactionHash],
     );
   }
 
-  private async onTierChange(log: Log) {
+  private async onTierChange(client: import("pg").PoolClient, log: Log) {
     const { tokenId, newTier } = (log as any).args ?? {};
-    await pool.query(
+    await client.query(
       `UPDATE members SET tier = $1 WHERE token_id = $2`,
       [Number(newTier), tokenId.toString()],
     );
-    // Record the tier change in tier_history for historical queries.
-    // ON CONFLICT uses the unique index added in migration 004.
-    await pool.query(
+    await client.query(
       `INSERT INTO tier_history (token_id, tier, block_number, tx_hash)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (token_id, tx_hash) DO NOTHING`,
@@ -94,10 +153,9 @@ export class Indexer {
     );
   }
 
-  private async onClaim(log: Log) {
+  private async onClaim(client: import("pg").PoolClient, log: Log) {
     const { tokenId, epoch, amount } = (log as any).args ?? {};
 
-    // Fetch the reputation that was used to compute this payout at the exact claim block.
     let reputationSnapshot = "0";
     try {
       const rep = await this.rewards.reputationOf(tokenId.toString(), { blockTag: log.blockNumber });
@@ -106,10 +164,14 @@ export class Indexer {
       // If the historical call fails (e.g. node doesn't support archive), default to 0.
     }
 
-    await pool.query(
+    // Insert the claim. If it already exists (same tx_hash), the RETURNING clause
+    // gives us null — we use that to gate the reputation update, preventing double
+    // counting if this block range is ever re-processed.
+    const insertRes = await client.query<{ tx_hash: string }>(
       `INSERT INTO claims (token_id, epoch, amount, reputation_snapshot, tx_hash, block_number, processed)
        VALUES ($1, $2, $3, $4, $5, $6, true)
-       ON CONFLICT (tx_hash) DO NOTHING`,
+       ON CONFLICT (tx_hash) DO NOTHING
+       RETURNING tx_hash`,
       [
         tokenId.toString(),
         epoch.toString(),
@@ -120,37 +182,24 @@ export class Indexer {
       ],
     );
 
-    // Credit reputation immediately so the user sees their points update in the UI.
-    await pool.query(
-      `INSERT INTO reputation (address, points)
-       SELECT address, 10 FROM members WHERE token_id = $1
-       ON CONFLICT (address) DO UPDATE SET points = reputation.points + 10`,
-      [tokenId.toString()],
-    );
+    // Only bump reputation if we actually inserted a new claim row.
+    if (insertRes.rowCount && insertRes.rowCount > 0) {
+      await client.query(
+        `INSERT INTO reputation (address, points)
+         SELECT address, 10 FROM members WHERE token_id = $1
+         ON CONFLICT (address) DO UPDATE SET points = reputation.points + 10`,
+        [tokenId.toString()],
+      );
+    }
   }
 
-  private async onEpochClosed(log: Log) {
+  private async onEpochClosed(client: import("pg").PoolClient, log: Log) {
     const { epoch, totalForEpoch } = (log as any).args ?? {};
-    await pool.query(
+    await client.query(
       `INSERT INTO epochs (epoch, total_for_epoch, closed_at_block, tx_hash)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (epoch) DO NOTHING`,
       [epoch.toString(), totalForEpoch.toString(), log.blockNumber, log.transactionHash],
-    );
-  }
-
-  private async getCursor(): Promise<number> {
-    const r = await pool.query<{ block_number: string }>(
-      `SELECT block_number FROM indexer_cursor WHERE id = 1`,
-    );
-    return r.rows[0] ? Number(r.rows[0].block_number) : 0;
-  }
-
-  private async setCursor(block: number) {
-    await pool.query(
-      `INSERT INTO indexer_cursor (id, block_number) VALUES (1, $1)
-       ON CONFLICT (id) DO UPDATE SET block_number = EXCLUDED.block_number`,
-      [block],
     );
   }
 }
