@@ -53,7 +53,7 @@ export type ClaimResp = {
  * Canonical message the client must sign to authorise a claim request.
  * Ties the signature to one specific (smartAccount, tokenId, epoch) triple — not replayable.
  */
-function claimDigest(smartAccount: string, tokenId: string, epoch: string): Uint8Array {
+export function claimDigest(smartAccount: string, tokenId: string, epoch: string): Uint8Array {
   const encoded = AbiCoder.defaultAbiCoder().encode(
     ["address", "uint256", "uint256"],
     [smartAccount, BigInt(tokenId), BigInt(epoch)],
