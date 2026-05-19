@@ -34,7 +34,7 @@ Backend
 
 - Reorg safety: store block_number and block_hash in cursor; verify hash before each tick; rewind on reorg; wrap entire tick in DB transaction so crash mid-tick rolls back — no partial state - Critical
 - Fixed known race: previously events written outside a transaction caused reputation to inflate by +10 on every restart when claim insert was skipped by ON CONFLICT but the UPDATE still ran - High
-- claim.ts — Added claimDigest() helper, signature verification via verifyMessage against smart account owner(), and fixed membership query to check LOWER(address) = LOWER($2) - Critical
+- Handled chicken-egg problem in claim, claim.ts — Added claimDigest() helper, signature verification via verifyMessage against smart account owner(), and fixed membership query to check LOWER(address) = LOWER($2) - Critical
 - indexer.ts — onClaim fetches reputationOf(tokenId, {blockTag: blockNumber}) at exact claim block and stores it in reputation_snapshot; falls back to "0" if node doesn't support archive calls - High
 - server.ts — Added Zod ClaimReqSchema (validates address format, tokenId/epoch presence, signature prefix); validates before handleClaim; returns 400 on bad input - High
 - migrations/004_fix_reputation_snapshot.sql — Adds reputation_snapshot with IF NOT EXISTS DEFAULT 0 (safe on empty and populated DBs); adds unique index on tier_history(token_id, tx_hash) for idempotent inserts - High
@@ -64,7 +64,7 @@ You have to run backend locally to see the events being caught, and postgress. T
 
 So, npm i && cd backend && npm run dev
 
-Live link - https://we-see-frontend.vercel.app/
+Live link - https://we-see-frontend.vercel.app/. ( event getting caught on locally run backend for now )
 
 if you want to play around, i made a demo account with all the permissions, try minting for another wallet, change tier, and claim. 
 
@@ -80,3 +80,13 @@ tokendId 2 and 3 - minted and claimed on V2. Preserving everything.
 First mint -> tier -> epoch -> claim.  ( 3rd, 11, 21, last 3rd)
 
 <img src="EventsCatchBackend.png" alt="Events Catch Backend" width="800" />
+
+Attaching database entry
+
+<img src="PostgressEntry.png" alt="Events Catch Backend" width="800" />
+
+
+<img src="forgeTest.png" alt="Events Catch Backend" width="800" />
+
+
+<img src="backendTest.png" alt="Events Catch Backend" width="800" />
