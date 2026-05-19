@@ -45,6 +45,31 @@ If you want to play around, I made a demo account with all the permissions. Try 
 - **tokenId 1** — minted and claimed on V1
 - **tokenId 2 and 3** — minted and claimed on V2 (preserving everything)
 
+- **Note:** If you want to deposit rewards, demo wallet have tokens use these commands in contracts folder. 
+
+#### 1. Grant DEPOSITOR_ROLE on the new RewardsDistributor to the admin EOA ( already given )
+cast send 0x12fD4F2252FbDB9A56C5Ed85A305B13Bc2370D01 \
+  "grantRole(bytes32,address)" \
+  0x8f4f2da22e8ac8f11e15f9fc141cddbb5deea8800186560abb6e68c5496619a9 \
+  0x0F2a7B637Cffd69C1142666bCf3671F3304Ee0D0 \
+  --rpc-url https://sepolia-rpc.scroll.io/ \
+  --private-key 0x14dc9545564436e346aa4276575caf9b0607ff0ed2a6e33c842d305053f3fc55
+
+#### 2. Approve the new RewardsDistributor to spend reward tokens from admin wallet
+cast send 0x260D994073378154A773f4dE3f26652F854cdFfd \
+  "approve(address,uint256)" \
+  0x12fD4F2252FbDB9A56C5Ed85A305B13Bc2370D01 \
+  10000000000000000000 \
+  --rpc-url https://sepolia-rpc.scroll.io/ \
+  --private-key 0x14dc9545564436e346aa4276575caf9b0607ff0ed2a6e33c842d305053f3fc55
+
+#### 3. Deposit 10 reward tokens into the new RewardsDistributor from admin wallet
+cast send 0x12fD4F2252FbDB9A56C5Ed85A305B13Bc2370D01 \
+  "deposit(uint256)" \
+  10000000000000000000 \
+  --rpc-url https://sepolia-rpc.scroll.io/ \
+  --private-key 0x14dc9545564436e346aa4276575caf9b0607ff0ed2a6e33c842d305053f3fc55
+
 **Flow:** `First mint → tier → epoch → claim` (3rd, 11, 21, last 3rd)
 
 ### Screenshots
