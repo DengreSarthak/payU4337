@@ -35,7 +35,7 @@ contract Deploy is Script {
         RewardsDistributor rdImpl = new RewardsDistributor();
         bytes memory rdInit = abi.encodeCall(
             RewardsDistributor.initialize,
-            (admin, sbt, IERC20(rewardToken), opsWallet, burnSink, 7 days)
+            (admin, sbt, IERC20(rewardToken), opsWallet, burnSink, 5 minutes)
         );
         ERC1967Proxy rdProxy = new ERC1967Proxy(address(rdImpl), rdInit);
         RewardsDistributor rd = RewardsDistributor(address(rdProxy));
