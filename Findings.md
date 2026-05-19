@@ -25,7 +25,7 @@ npm i && cd backend && npm run dev
 
 ### Live Link
 
-- **Frontend:** [https://we-see-frontend.vercel.app/](https://we-see-frontend-git-main-dengresarthak420-gmailcoms-projects.vercel.app/)
+- **Frontend:** [https://we-see-frontend.vercel.app/](https://we-see-frontend.vercel.app/)
   > Events are currently being caught on the locally-run backend.
 
 ### Demo Account
@@ -69,6 +69,7 @@ cast send 0x12fD4F2252FbDB9A56C5Ed85A305B13Bc2370D01 \
   10000000000000000000 \
   --rpc-url https://sepolia-rpc.scroll.io/ \
   --private-key 0x14dc9545564436e346aa4276575caf9b0607ff0ed2a6e33c842d305053f3fc55
+
 
 **Flow:** `First mint → tier → epoch → claim` (3rd, 11, 21, last 3rd)
 
