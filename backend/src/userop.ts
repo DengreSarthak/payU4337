@@ -69,6 +69,7 @@ export async function buildClaimUserOp(args: {
   paymasterSigner: Wallet;
   paymasterVerificationGas: bigint;
   paymasterPostOpGas: bigint;
+  initCode?: string;
 }): Promise<PackedUserOp> {
   const nonce = await getNonce(args.provider, args.entryPoint, args.sender);
   const sig = await signPaymasterApproval(args.paymasterSigner, args.sender, nonce);
@@ -79,12 +80,17 @@ export async function buildClaimUserOp(args: {
     sig,
   );
 
+  const initCode = args.initCode && args.initCode !== "0x" ? args.initCode : "0x";
+  // SA deployment in the same UserOp needs more verification gas than a plain call.
+  const verificationGas = initCode !== "0x" ? 2_000_000n : 200_000n;
+  const callGas = 300_000n;
+
   return {
     sender: args.sender,
     nonce,
-    initCode: "0x",
+    initCode,
     callData: args.callData,
-    accountGasLimits: pack128(200_000n, 200_000n),
+    accountGasLimits: pack128(verificationGas, callGas),
     preVerificationGas: 50_000n,
     gasFees: pack128(1_500_000_000n, 3_000_000_000n),
     paymasterAndData: pnd,

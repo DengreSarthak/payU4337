@@ -11,8 +11,22 @@ import { Indexer, SBT_ABI, REWARDS_ABI } from "./indexer";
 import { runMigrations } from "./migrate";
 import { pool } from "./db";
 
+// Recursively convert bigints to 0x-hex strings so res.json() can serialize them.
+function hexifyBigints(value: unknown): unknown {
+  if (typeof value === "bigint") return `0x${value.toString(16)}`;
+  if (Array.isArray(value)) return value.map(hexifyBigints);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, hexifyBigints(v)]),
+    );
+  }
+  return value;
+}
+
 const ClaimReqSchema = z.object({
   smartAccount: z.string().regex(/^0x[0-9a-fA-F]{40}$/, "smartAccount must be a checksummed hex address"),
+  owner: z.string().regex(/^0x[0-9a-fA-F]{40}$/, "owner must be a hex address"),
+  salt: z.string().min(1, "salt is required"),
   tokenId: z.string().min(1, "tokenId is required"),
   epoch: z.string().min(1, "epoch is required"),
   userSignature: z.string().startsWith("0x", "userSignature must be a 0x-prefixed hex string"),
@@ -79,10 +93,12 @@ async function main() {
         paymaster: process.env.PAYMASTER_ADDRESS!,
         paymasterSigner,
         rewardsAddress: process.env.REWARDS_ADDRESS!,
+        factory: process.env.FACTORY_ADDRESS!,
       });
-      res.json(result);
+      res.json(hexifyBigints(result));
     } catch (e: any) {
-      res.status(500).json({ ok: false, error: e.message });
+      console.error("[claim] handler threw:", e);
+      res.status(500).json({ ok: false, reason: e?.message ?? String(e) });
     }
   });
 

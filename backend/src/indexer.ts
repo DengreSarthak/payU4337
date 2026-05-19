@@ -15,7 +15,8 @@ const REWARDS_ABI = [
 const POLL_INTERVAL_MS = 4_000;
 const BATCH = 500;
 // Stay this many blocks behind the tip so a reorg does not leave phantom events in the DB.
-const REORG_BUFFER = 12;
+// Set to 1 for testnets (fast feedback); raise to 12+ for mainnet.
+const REORG_BUFFER = 1;
 
 /**
  * Indexer
@@ -131,10 +132,12 @@ export class Indexer {
 
   private async onMint(client: import("pg").PoolClient, log: Log) {
     const { to, tokenId, tier } = (log as any).args ?? {};
+    // Idempotent on any unique violation (address OR token_id) so reprocessing
+    // the same Mint event during reorg/cursor rewind never crashes the indexer.
     await client.query(
       `INSERT INTO members (address, token_id, tier, minted_block, minted_tx, owner)
        VALUES ($1, $2, $3, $4, $5, $1)
-       ON CONFLICT (address) DO NOTHING`,
+       ON CONFLICT DO NOTHING`,
       [to.toLowerCase(), tokenId.toString(), Number(tier), log.blockNumber, log.transactionHash],
     );
   }
