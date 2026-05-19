@@ -154,7 +154,7 @@ export default function Page() {
   const walletAddress = connectedAddress ?? "";
   const [smartAccount, setSmartAccount] = useState("");
   const [salt, setSalt] = useState("0");
-  const [mintRecipient, setMintRecipient] = useState("");
+  const [mintRecipientEoa, setMintRecipientEoa] = useState("");
   const [adminTokenId, setAdminTokenId] = useState("");
   const [adminReputation, setAdminReputation] = useState("");
   const [adminTier, setAdminTier] = useState("0");
@@ -236,7 +236,7 @@ export default function Page() {
     const shouldSetLoading = options?.setLoadingState !== false;
     if (shouldSetLoading) setLoading(true);
     try {
-      const rpcUrl = "https://scroll-sepolia.drpc.org";
+      const rpcUrl = "https://sepolia-rpc.scroll.io/";
       const provider = providerOverride ?? new JsonRpcProvider(rpcUrl);
       const { entryPoint, factory, paymaster, sbt, rewards, backend } = getAddresses();
       let entryPointAddress: string;
@@ -273,7 +273,10 @@ export default function Page() {
       console.log(`[refresh] Using Scroll Sepolia RPC directly for contract reads`);
 
       const factoryContract = new Contract(factoryAddress, SMART_ACCOUNT_FACTORY_ABI, provider) as any;
-      const derived = (await factoryContract.getAddress(owner, asBigInt(salt))) as string;
+      // NOTE: ethers v6 BaseContract has a built-in getAddress() that shadows the
+      // Solidity getAddress(address,uint256) function on our factory. Call via the
+      // fully-qualified signature so ethers dispatches to the Solidity function.
+      const derived = (await factoryContract["getAddress(address,uint256)"](owner, asBigInt(salt))) as string;
       const code = await provider.getCode(derived);
 
       const sbtContract = new Contract(sbtAddress, MEMBERSHIP_SBT_ABI, provider) as any;
@@ -317,7 +320,7 @@ export default function Page() {
         collectionName = rawName || "—";
         const rawSymbol = await sbtContract.symbol();
         collectionSymbol = rawSymbol || "—";
-        const balance = await sbtContract.balanceOf(owner);
+        const balance = await sbtContract.balanceOf(derived);
         walletBalance = BigInt(balance).toString();
         console.log(`[refresh] SBT metadata loaded: name=${collectionName}, symbol=${collectionSymbol}, balance=${walletBalance}`);
       } catch (e) {
@@ -325,9 +328,11 @@ export default function Page() {
       }
 
       try {
-        const onChainTokenId = await sbtContract.tokenIdOf(owner);
+        // SBT holder is the smart account (it's the one that calls mint via UserOp
+        // and is the only address that can later call claim).
+        const onChainTokenId = await sbtContract.tokenIdOf(derived);
         tokenId = BigInt(onChainTokenId).toString();
-        console.log(`[refresh] tokenIdOf(${owner.slice(0, 10)}... EOA) = ${tokenId}`);
+        console.log(`[refresh] tokenIdOf(${derived.slice(0, 10)}... SA) = ${tokenId}`);
         if (tokenId !== "0") {
           try {
             const onChainTier = await sbtContract.tierOf(tokenId);
@@ -481,7 +486,7 @@ export default function Page() {
 
     const entryPointAddress = assertConfiguredAddress(getAddresses().entryPoint, "NEXT_PUBLIC_ENTRYPOINT_ADDRESS");
     // Use a dedicated RPC (not MetaMask's BrowserProvider) so getUserOpHash computes on the correct chain.
-    const readProvider = new JsonRpcProvider("https://scroll-sepolia.drpc.org");
+    const readProvider = new JsonRpcProvider("https://sepolia-rpc.scroll.io/");
     const entryPoint = new Contract(entryPointAddress, ENTRY_POINT_ABI, readProvider) as any;
 
     // DEBUG: log the userOp being signed
@@ -519,11 +524,36 @@ export default function Page() {
       return;
     }
 
-    const recipient = mintRecipient.trim() || walletAddress;
-    if (!recipient.match(/^0x[0-9a-fA-F]{40}$/)) {
-      setResult({ title: "mint", ok: false, message: "Invalid recipient address" });
+    // The input is the recipient's EOA. We always mint to that EOA's smart account
+    // (claim() requires msg.sender == ownerOf(tokenId), and only the SA can be a
+    // UserOp sender in our gasless flow). If the field is blank we use the connected
+    // wallet's own smart account.
+    const targetEoa = mintRecipientEoa.trim() || walletAddress;
+    if (!targetEoa.match(/^0x[0-9a-fA-F]{40}$/)) {
+      setResult({ title: "mint", ok: false, message: "Invalid recipient EOA address" });
       return;
     }
+
+    let recipient: string;
+    if (targetEoa.toLowerCase() === walletAddress.toLowerCase() && smartAccount) {
+      recipient = smartAccount;
+    } else {
+      // Derive the SA for an arbitrary EOA via the factory.
+      const factoryAddress = assertConfiguredAddress(getAddresses().factory, "NEXT_PUBLIC_FACTORY_ADDRESS");
+      const provider = new JsonRpcProvider("https://sepolia-rpc.scroll.io/");
+      const factoryContract = new Contract(factoryAddress, SMART_ACCOUNT_FACTORY_ABI, provider) as any;
+      try {
+        recipient = (await factoryContract["getAddress(address,uint256)"](targetEoa, asBigInt(salt))) as string;
+      } catch (e) {
+        setResult({
+          title: "mint",
+          ok: false,
+          message: `Could not derive smart account for ${targetEoa}: ${e instanceof Error ? e.message : String(e)}`,
+        });
+        return;
+      }
+    }
+    console.log(`[mint] target EOA ${targetEoa} \u2192 SA ${recipient}`);
 
     setLoading(true);
     try {
@@ -610,10 +640,23 @@ export default function Page() {
   }
 
   async function onClaim() {
-    if (!walletAddress || !smartAccount) return;
-    const tokenId = state.tokenId;
-    const currentEpochBn = state.currentEpoch && state.currentEpoch !== "—" ? BigInt(state.currentEpoch) : 0n;
+    if (!walletAddress) return;
+    // Force a fresh on-chain read so we never claim with stale tokenId/epoch
+    // (e.g. right after switching wallets, when the useEffect refresh is mid-flight).
+    const snapshot = await refresh(walletAddress, undefined, { setLoadingState: false });
+    if (!snapshot) {
+      setResult({ title: "claim", ok: false, message: "Could not refresh on-chain state" });
+      return;
+    }
+    const sa = snapshot.smartAccount || smartAccount;
+    if (!sa) {
+      setResult({ title: "claim", ok: false, message: "Smart account not derived yet" });
+      return;
+    }
+    const tokenId = snapshot.tokenId;
+    const currentEpochBn = snapshot.currentEpoch && snapshot.currentEpoch !== "—" ? BigInt(snapshot.currentEpoch) : 0n;
     const epoch = currentEpochBn > 0n ? (currentEpochBn - 1n).toString() : "0";
+    console.log("[claim] using fresh snapshot:", { sa, tokenId, epoch, currentEpoch: snapshot.currentEpoch });
     if (tokenId === "0" || !tokenId) {
       setResult({ title: "claim", ok: false, message: "No member token found for this smart account" });
       return;
@@ -626,13 +669,15 @@ export default function Page() {
       if (!walletClient) throw new Error("Connected wallet client unavailable");
       const sig = await walletClient.signMessage({
         account: walletAddress as `0x${string}`,
-        message: { raw: claimDigest(smartAccount, tokenId, epoch) },
+        message: { raw: claimDigest(sa, tokenId, epoch) },
       });
       const response = await fetch("/api/claim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          smartAccount,
+          smartAccount: sa,
+          owner: walletAddress,
+          salt,
           tokenId,
           epoch,
           userSignature: sig,
@@ -1038,19 +1083,23 @@ export default function Page() {
               </div>
 
               <p className="section-copy">
-                Mint to any address (defaults to your connected wallet). Claim auto-uses your token ID and the previous epoch
+                Enter any EOA — we mint the SBT to that EOA&apos;s smart account so claims stay gasless. Leave blank to mint to your own
+                smart account ({smartAccount ? formatShortAddress(smartAccount) : "—"}). Claim auto-uses your token ID and the previous epoch
                 ({formatEpoch(activeEpoch)}).
               </p>
 
               <div className="form-grid" style={{ gridTemplateColumns: "1fr", marginTop: 0 }}>
                 <div className="field">
-                  <label htmlFor="mintRecipient">Mint recipient</label>
+                  <label htmlFor="mintRecipientEoa">Recipient EOA</label>
                   <input
-                    id="mintRecipient"
-                    value={mintRecipient}
-                    onChange={(event) => setMintRecipient(event.target.value)}
+                    id="mintRecipientEoa"
+                    value={mintRecipientEoa}
+                    onChange={(event) => setMintRecipientEoa(event.target.value)}
                     placeholder={walletAddress || "0x..."}
                   />
+                  <p className="hint" style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
+                    The SBT will be minted to <code>factory.getAddress(EOA, salt)</code>, not to the EOA itself.
+                  </p>
                 </div>
               </div>
 
@@ -1066,18 +1115,15 @@ export default function Page() {
                 </button>
               </div>
 
-              <div className="card-foot">
-                <span className="dot good" />
-                <span>gasless via ERC-4337 paymaster</span>
-              </div>
             </article>
           </div>
         </section>        
 
         {/* ── 03 ACTIONS + 04 LOG ─────────────────────────────────────── */}
         <section className="actions-stage section" id="compute">
+          <div className="admin-cards-group">
           {/* membership admin */}
-          <article className="action-card action-card-admin">
+          <article className="action-card action-card-admin admin-card-horizontal">
             <div className="section-header compact">
               <span className="section-index">03A</span>
               <div>
@@ -1089,67 +1135,73 @@ export default function Page() {
               </div>
             </div>
 
-            <div className="form-grid">
-              <div className="field">
-                <label htmlFor="adminTokenId">Token ID</label>
-                <input
-                  id="adminTokenId"
-                  value={adminTokenId}
-                  onChange={(event) => setAdminTokenId(event.target.value)}
-                  placeholder={state.tokenId === "0" ? "No token yet" : state.tokenId}
-                />
+            <div className="admin-card-body">
+              <div className="status-summary compact-top">
+                <div className="summary-item">
+                  <span>rewards pool</span>
+                  <strong>{state.rewardsPoolAccrued}</strong>
+                </div>
               </div>
-              <div className="field">
-                <label htmlFor="adminTier">Membership tier</label>
-                <select id="adminTier" value={adminTier} onChange={(event) => setAdminTier(event.target.value)}>
-                  {TIER_NAMES.map((tierName, index) => (
-                    <option key={tierName} value={index}>
-                      {tierName}
-                    </option>
-                  ))}
-                </select>
+              <div className="form-grid">
+                <div className="field">
+                  <label htmlFor="adminTokenId">Token ID</label>
+                  <input
+                    id="adminTokenId"
+                    value={adminTokenId}
+                    onChange={(event) => setAdminTokenId(event.target.value)}
+                    placeholder={state.tokenId === "0" ? "No token yet" : state.tokenId}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="adminTier">Membership tier</label>
+                  <select id="adminTier" value={adminTier} onChange={(event) => setAdminTier(event.target.value)}>
+                    {TIER_NAMES.map((tierName, index) => (
+                      <option key={tierName} value={index}>
+                        {tierName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label htmlFor="adminReputation">Reputation score</label>
+                  <input
+                    id="adminReputation"
+                    value={adminReputation}
+                    onChange={(event) => setAdminReputation(event.target.value)}
+                    placeholder={state.reputation}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="minterAddress">Grant role to address</label>
+                  <input
+                    id="minterAddress"
+                    value={minterAddress}
+                    onChange={(event) => setMinterAddress(event.target.value)}
+                    placeholder={walletAddress || "0x..."}
+                  />
+                </div>
               </div>
-              <div className="field">
-                <label htmlFor="adminReputation">Reputation score</label>
-                <input
-                  id="adminReputation"
-                  value={adminReputation}
-                  onChange={(event) => setAdminReputation(event.target.value)}
-                  placeholder={state.reputation}
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="minterAddress">Grant role to address</label>
-                <input
-                  id="minterAddress"
-                  value={minterAddress}
-                  onChange={(event) => setMinterAddress(event.target.value)}
-                  placeholder={walletAddress || "0x..."}
-                />
-              </div>
-            </div>
 
-            <div className="actions">
-              <button className="button primary" type="button" onClick={onSetTier} disabled={loading || !walletAddress}>
-                Set membership tier
-              </button>
-              <button className="button secondary" type="button" onClick={onSetReputation} disabled={loading || !walletAddress}>
-                Set reputation
-              </button>
-              <button className="button ghost" type="button" onClick={onGrantMinterRole} disabled={loading || !walletAddress}>
-                Grant MINTER_ROLE
-              </button>
-              <button className="button ghost" type="button" onClick={onGrantRevokerRole} disabled={loading || !walletAddress}>
-                Grant REVOKER_ROLE
-              </button>
-              <button className="button ghost" type="button" onClick={onGrantDistributorRole} disabled={loading || !walletAddress}>
-                Grant DISTRIBUTOR_ROLE
-              </button>
+              <div className="actions">
+                <button className="button primary" type="button" onClick={onSetTier} disabled={loading || !walletAddress}>
+                  Set membership tier
+                </button>
+                <button className="button secondary" type="button" onClick={onSetReputation} disabled={loading || !walletAddress}>
+                  Set reputation
+                </button>
+                <button className="button ghost" type="button" onClick={onGrantRevokerRole} disabled={loading || !walletAddress}>
+                  Grant REVOKER_ROLE
+                </button>
+                <button className="button ghost" type="button" onClick={onGrantDistributorRole} disabled={loading || !walletAddress}>
+                  Grant DISTRIBUTOR_ROLE
+                </button>
+              </div>
             </div>
           </article>
 
+          <div className="admin-cards-row">
           {/* tier allocation admin */}
-          <article className="action-card action-card-admin action-card-rewards compact-card" style={{ gridRow: 2 }}>
+          <article className="action-card action-card-admin action-card-rewards compact-card">
             <div className="section-header compact">
               <span className="section-index">03B</span>
               <div>
@@ -1191,16 +1243,6 @@ export default function Page() {
               </button>
             </div>
 
-            <div className="status-summary">
-              <div className="summary-item">
-                <span>claim fee</span>
-                <strong>{rewardsConfig.claimFeeBps} bps</strong>
-              </div>
-              <div className="summary-item">
-                <span>tier bps total</span>
-                <strong>{rewardsConfig.tierBpsTotal}{rewardsConfig.tierBpsValid ? "" : " (invalid)"}</strong>
-              </div>
-            </div>
           </article>
 
           {/* treasury & burn admin */}
@@ -1264,61 +1306,43 @@ export default function Page() {
               </button>
             </div>
 
-            <div className="status-summary">
-              <div className="summary-item">
-                <span>burn sink</span>
-                <strong>{formatShortAddress(rewardsConfig.burnSink)}</strong>
-              </div>
-              <div className="summary-item">
-                <span>rewards pool</span>
-                <strong>{state.rewardsPoolAccrued}</strong>
-              </div>
-            </div>
           </article>
+          </div>
 
           {/* paymaster + SBT v2 */}
-          <article className="action-card action-card-admin action-card-paymaster compact-card" style={{ gridColumn: 2, gridRow: 2 }}>
+          <article className="action-card action-card-admin action-card-paymaster compact-card admin-card-horizontal">
             <div className="section-header compact">
               <span className="section-index">03D</span>
               <div>
                 <p className="overline">protocol switches</p>
-                <h2>Paymaster &amp; SBT</h2>
+                <h2>Paymaster</h2>
                 <p className="section-subtitle">
-                  Top up gas sponsorship and toggle SBT v2 sync.
+                  Top up gas sponsorship.
                 </p>
               </div>
             </div>
 
-            <div className="form-grid">
-              <div className="field">
-                <label htmlFor="paymasterDepositAmount">Paymaster deposit ETH</label>
-                <input
-                  id="paymasterDepositAmount"
-                  value={paymasterDepositAmount}
-                  onChange={(event) => setPaymasterDepositAmount(event.target.value)}
-                  placeholder="0.2"
-                />
+            <div className="admin-card-body">
+              <div className="form-grid">
+                <div className="field">
+                  <label htmlFor="paymasterDepositAmount">Paymaster deposit ETH</label>
+                  <input
+                    id="paymasterDepositAmount"
+                    value={paymasterDepositAmount}
+                    onChange={(event) => setPaymasterDepositAmount(event.target.value)}
+                    placeholder="0.2"
+                  />
+                </div>
               </div>
-              <div className="field">
-                <label>SBT v2 sync</label>
-                <input value={rewardsConfig.sbtIsV2 ? "enabled" : "disabled"} readOnly />
-              </div>
-            </div>
 
-            <div className="actions">
-              <button className="button primary" type="button" onClick={onFundPaymaster} disabled={loading || !walletAddress}>
-                Deposit to paymaster
-              </button>
-              <button
-                className="button ghost"
-                type="button"
-                onClick={() => onToggleSbtV2(!adminSbtIsV2)}
-                disabled={loading || !walletAddress}
-              >
-                {adminSbtIsV2 ? "Disable SBT v2 sync" : "Enable SBT v2 sync"}
-              </button>
+              <div className="actions">
+                <button className="button primary" type="button" onClick={onFundPaymaster} disabled={loading || !walletAddress}>
+                  Deposit to paymaster
+                </button>
+              </div>
             </div>
           </article>
+          </div>
 
           {/* v2 admin — distribute & revoke (available after upgrading SBT to v2) */}
           <article className="action-card action-card-admin action-card-v2">

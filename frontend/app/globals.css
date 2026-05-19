@@ -1035,7 +1035,117 @@ h1 {
   text-decoration: none;
 }
 
+.admin-cards-group {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 48px;
+}
+
+.admin-cards-group .action-card-admin {
+  position: relative;
+  padding: 32px;
+  border-left: 3px solid var(--accent);
+  background: linear-gradient(180deg, rgba(32, 24, 17, 0.9), rgba(14, 10, 7, 0.92));
+  transition: transform 0.22s ease, box-shadow 0.22s ease;
+}
+
+.admin-cards-group .action-card-admin:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 30px 70px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(244, 91, 45, 0.15);
+}
+
+.admin-cards-group .action-card-admin.compact-card {
+  padding: 32px;
+}
+
+.admin-cards-group .action-card-admin::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 3px;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, var(--accent), transparent 60%);
+  opacity: 0.4;
+}
+
+.admin-cards-group .action-card-admin .section-header.compact {
+  margin-bottom: 20px;
+}
+
+.admin-cards-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.admin-cards-row .action-card-admin {
+  margin-bottom: 0;
+}
+
+.admin-card-horizontal {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 32px;
+  align-items: start;
+}
+
+.admin-card-horizontal .section-header.compact {
+  margin-bottom: 0;
+}
+
+.admin-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.admin-card-horizontal .actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.status-summary.compact-top {
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+
+.status-summary.compact-top .summary-item {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.admin-cards-row .action-card-admin {
+  padding: 20px;
+  gap: 14px;
+}
+
+.admin-cards-row .action-card-admin .section-header.compact {
+  margin-bottom: 8px;
+}
+
+.admin-cards-row .action-card-admin .form-grid {
+  gap: 10px;
+}
+
+.admin-cards-row .action-card-admin .actions {
+  margin-top: 4px;
+}
+
 @media (max-width: 1100px) {
+  .admin-card-horizontal {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-card-horizontal .section-header.compact {
+    margin-bottom: 22px;
+  }
+
+  .admin-card-horizontal .actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .hero-grid,
   .actions-stage,
   .comparison-grid,
@@ -1045,6 +1155,19 @@ h1 {
 
   .status-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-cards-row {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-cards-group {
+    gap: 20px;
+  }
+
+  .admin-cards-group .action-card-admin,
+  .admin-cards-group .action-card-admin.compact-card {
+    padding: 24px;
   }
 }
 
