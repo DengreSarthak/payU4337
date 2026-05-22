@@ -26,14 +26,20 @@ contract TierPayoutModule {
     address public operator;
 
     mapping(IMembershipSBTReader.Tier => uint256) public maxPayoutByTier;
+    mapping(address => bool) public whitelistedTargets;
+    mapping(address => mapping(bytes4 => bool)) public allowedSelectors;
 
     event Payout(address indexed to, address indexed token, uint256 amount);
+    event TargetWhitelisted(address indexed target, bool whitelisted);
+    event SelectorAllowed(address indexed target, bytes4 selector, bool allowed);
 
     error OnlyOperator();
     error OnlySafe();
     error NotEligible();
     error OverTierMax();
     error CallFailed();
+    error UnwhitelistedTarget();
+    error DisallowedSelector();
 
     constructor(ISafe _safe, IMembershipSBTReader _sbt, address _operator) {
         safe = _safe;
@@ -62,6 +68,18 @@ contract TierPayoutModule {
         operator = newOperator;
     }
 
+    function setWhitelistedTarget(address target, bool allowed) external {
+        if (msg.sender != address(safe)) revert OnlySafe();
+        whitelistedTargets[target] = allowed;
+        emit TargetWhitelisted(target, allowed);
+    }
+
+    function setAllowedSelector(address target, bytes4 selector, bool allowed) external {
+        if (msg.sender != address(safe)) revert OnlySafe();
+        allowedSelectors[target][selector] = allowed;
+        emit SelectorAllowed(target, selector, allowed);
+    }
+
     /// @notice Pay `amount` of `token` to `to` from the Safe.
     /// @dev    Operator-gated. Recipient must hold an SBT; amount must not exceed tier max.
     function payout(address token, address to, uint256 amount) external onlyOperator {
@@ -75,13 +93,18 @@ contract TierPayoutModule {
         emit Payout(to, token, amount);
     }
 
-    /// @notice Generic Safe call. Operator can ask the Safe to call any contract.
-    /// @dev    Used for ad-hoc treasury operations.
+    /// @notice Execute whitelisted Safe call. Target and selector must be pre-approved.
+    /// @dev    Operator can only call Safe-whitelisted targets with pre-approved selectors.
     function execFromSafe(address target, uint256 value, bytes calldata data)
         external
         onlyOperator
         returns (bool ok)
     {
+        if (!whitelistedTargets[target]) revert UnwhitelistedTarget();
+        if (data.length >= 4) {
+            bytes4 selector = bytes4(data[:4]);
+            if (!allowedSelectors[target][selector]) revert DisallowedSelector();
+        }
         ok = safe.execTransactionFromModule(target, value, data, ISafe.Operation.Call);
         if (!ok) revert CallFailed();
     }

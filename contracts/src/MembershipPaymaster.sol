@@ -59,8 +59,8 @@ contract MembershipPaymaster is IPaymaster, Ownable {
         bytes calldata sig = userOp.paymasterAndData[52:];
 
         bytes32 digest = keccak256(abi.encode(userOp.sender, userOp.nonce)).toEthSignedMessageHash();
-        address recovered = digest.recover(sig);
-        if (recovered != signer) revert BadSignature();
+        (address recovered, ECDSA.RecoverError error, ) = digest.tryRecover(sig);
+        if (error != ECDSA.RecoverError.NoError || recovered != signer) revert BadSignature();
 
         uint256 day = block.timestamp / 1 days;
         if (spentOnDay[userOp.sender][day] + maxCost > dailyCapWei) revert OverDailyCap();
