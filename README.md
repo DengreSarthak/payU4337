@@ -1,4 +1,4 @@
-# WeSee
+# PayU4337
 
 A gasless soulbound membership platform built on ERC-4337. Users mint non-transferable membership SBTs, earn reputation across tiers, and claim pro-rata reward distributions — all without paying gas.
 
