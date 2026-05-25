@@ -1314,7 +1314,7 @@ export default function Page() {
             <div className="section-header compact">
               <span className="section-index">03D</span>
               <div>
-                <p className="overline">protocol switches</p>
+                <p className="overline">protocol switches up</p>
                 <h2>Paymaster</h2>
                 <p className="section-subtitle">
                   Top up gas sponsorship.
